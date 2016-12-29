@@ -22,84 +22,144 @@ class PolylangBulkTranslate {
 		// Check that Polylang is active
 		global $polylang;
 
-		if (isset($polylang)) {
-			add_action( 'current_screen', array( $this, 'register_bulk_actions' ) );
+		$should_activate = isset( $polylang ) && isset( $_GET['lang'] ) && $_GET['lang'] !== 'all';
+
+		if ( $should_activate ) {
+
+			$translatable_post_types = array_filter( get_post_types(), function ( $post_type ) {
+				return pll_is_translated_post_type($post_type);
+			} );
+
+			foreach ( $translatable_post_types as $post_type ) {
+				add_filter( "bulk_actions-edit-{$post_type}",  array( $this, 'register_bulk_post_actions' ) );
+				add_filter( "handle_bulk_actions-edit-{$post_type}",  array( $this, 'handle_bulk_post_action' ), 10, 3 );
+			}
+
+			// $translatable_taxonomies = array_filter(get_taxonomies(), function ($taxonomy) {
+			// 	return pll_is_translated_taxonomy($taxonomy);
+			// });
+
+			// foreach ($translatable_taxonomies as $taxonomy) {
+			// 	add_filter( "bulk_actions-edit-{$taxonomy}",  array( $this, 'register_bulk_tax_actions' ) );
+			// 	add_filter( "handle_bulk_actions-edit-{$taxonomy}",  array( $this, 'handle_bulk_tax_action' ), 10, 3 );
+			// }
+
+			add_action( 'admin_notices', array( $this, 'show_admin_notice' ) );
+
 		}
 
 	}
 
+
+
 	/**
 	 * Register "Translate to: $lang" -actions
+	 *
+	 * @param array $bulk_actions
+	 *
 	 */
-	function register_bulk_actions() {
 
-		$is_any_language_active = !empty( pll_current_language() );
-		$currentScreen      = get_current_screen();
-		$is_post_list       = $currentScreen->base === 'edit';
-		$is_taxonomy_list   = $currentScreen->base === 'edit-tags';
-		$post_type          = $currentScreen->post_type;
-		$taxonomy           = $currentScreen->taxonomy;
-		$type               = $is_post_list ? 'post' : 'term';
-		// TODO: Add support for taxonomies
-		$is_translatable    = $is_post_list && pll_is_translated_post_type( $post_type );
-
-		$should_init =  $is_any_language_active && $is_translatable;
-
-		if (!$should_init) {
-			return;
-		}
-
-		$bulk_actions = new Seravo_Custom_Bulk_Action( array( 'post_type' => $post_type ) );
+	function register_bulk_post_actions( $bulk_actions ) {
 
 		// Register action for each language, except current
 		foreach ( pll_languages_list() as $language ) {
 
-			if ($language === pll_current_language()) {
+			if ( $language === pll_current_language() ) {
 				continue;
 			}
 
-			$bulk_actions->register_bulk_action( array(
-				'menu_text' => 'Translate to: ' . strtoupper( $language) ,
-				'admin_notice' => ( $type === 'post' ) ? '%s posts translated.' : '%s terms translated.',
-				'callback' => function( $ids ) use ( $language, $post_type, $type ) {
-
-					$posts = get_posts(['post__in' => $ids, 'post_type' => $post_type ]);
-					$posts_sorted = $this->sort_by_hierarchy($posts);
-					$ids_sorted = array_map(function ($post) { return $post->ID; }, $posts_sorted);
-
-					// Check that all parent posts are includes in the array,
-					// or that they are already translated.
-					foreach ( $ids_sorted as $post_id ) {
-						$parent_id = wp_get_post_parent_id( $post_id );
-
-						if ( $parent_id ) {
-							$parent_is_included = in_array( $parent_id, $ids );
-							$parent_is_translated = pll_get_post( $parent_id, $language );
-
-							if ( !$parent_is_included && !$parent_is_translated ) {
-								// TODO: Error!!! Parent page must exist or included in the array.
-							}
-						}
-					}
-
-					foreach ( $ids as $id ) {
-						if ( $type === 'post' ) {
-							$this->translate_post( $id, $language );
-						} else {
-							// TODO: Add support for taxonomies
-						}
-					}
-
-					return true;
-
-				}
-			) );
+			$bulk_actions["translate_to_{$language}"] = __( 'Translate to', 'pll_bulk_translate') . ': ' . strtoupper( $language );
 
 		}
 
-		$bulk_actions->init();
+		return $bulk_actions;
 
 	}
+
+
+	/**
+	 * Handle bulk post action
+	 *
+	 * @param string $redirect_to Redirect url
+	 * @param string $action Action name
+	 * @param array $post_ids Array of post ids
+	 *
+	 */
+
+ 	function handle_bulk_post_action( $redirect_to, $action, $post_ids ) {
+
+		$action_parts = explode('translate_to_', $action);
+		$language = $action_parts[1];
+		$should_translate = in_array($language, pll_languages_list()) && $language !== pll_current_language();
+
+ 		if ( ! $should_translate ) {
+			return $redirect_to;
+		}
+
+		$posts = get_posts( ['post__in' => $post_ids, 'post_type' => $post_type] );
+		$posts_sorted = $this->sort_posts_by_hierarchy( $posts );
+		$ids_sorted = array_map( function ( $post ) { return $post->ID; }, $posts_sorted );
+
+		// Check that all parent posts are includes in the array,
+		// or that they are already translated.
+		foreach ( $ids_sorted as $post_id ) {
+			$parent_id = wp_get_post_parent_id( $post_id );
+
+			if ( $parent_id ) {
+				$parent_is_included = in_array( $parent_id, $ids );
+				$parent_is_translated = pll_get_post( $parent_id, $language );
+
+				if ( !$parent_is_included && !$parent_is_translated ) {
+					// TODO: Error!!! Parent page must exist or included in the array.
+				}
+			}
+		}
+
+		foreach ( $post_ids as $post_id ) {
+			if ( $type === 'post' ) {
+				$this->translate_post( $post_id, $language );
+			} else {
+				// TODO: Add support for taxonomies
+			}
+		}
+
+		$redirect_to = add_query_arg( 'bulk_translated_posts', count( $post_ids ), $redirect_to );
+
+ 		return $redirect_to;
+ 	}
+
+
+	// function register_bulk_tax_actions( $bulk_actions ) {
+	//
+	// }
+
+	// function handle_bulk_tax_action( $redirect_to, $action, $tax_ids ) {
+	//
+	// }
+
+
+	/**
+	 * Show admin notice
+	 */
+
+	function show_admin_notice() {
+
+		if ( ! empty( $_REQUEST['bulk_translated_posts'] ) ) {
+
+			$translated_count = intval( $_REQUEST['bulk_translated_posts'] );
+
+			printf( '<div id="message" class="updated fade">' .
+				_n(
+					'Translated %s post to: ' . $language,
+					'Translated %s posts to: ' . $language,
+					$translated_count,
+					'pll_bulk_translate'
+				) . '</div>', $translated_count );
+
+		}
+
+	}
+
 
 	/**
 	 * Sort posts by hierarchy level
@@ -108,7 +168,7 @@ class PolylangBulkTranslate {
 	 *
 	 */
 
-	function sort_by_hierarchy($posts) {
+	function sort_posts_by_hierarchy( $posts ) {
 
 		$posts_by_hierarchy = [];
 
@@ -139,7 +199,9 @@ class PolylangBulkTranslate {
 		$from_post = get_post( $post_id );
 		$has_translation = pll_get_post( $post_id, $new_lang );
 
-		if ($has_translation) return;
+		if ( $has_translation ) {
+			return;
+		}
 
 		$new_post = clone $from_post; // Copy the post
 
@@ -174,4 +236,4 @@ class PolylangBulkTranslate {
 	}
 }
 
-add_action('plugins_loaded', create_function('', 'global $polylang_bulk_translate; $polylang_bulk_translate = new PolylangBulkTranslate();'));
+add_action( 'wp_loaded', create_function( '', 'global $polylang_bulk_translate; $polylang_bulk_translate = new PolylangBulkTranslate();' ) );
