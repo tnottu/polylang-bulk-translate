@@ -158,10 +158,11 @@ class PolylangBulkTranslate {
 		 */
 		pll_set_post_language( $new_post_id, $new_lang );
 
-		pll_save_post_translations( array(
-			pll_get_post_language( $from_post->ID ) => $from_post->ID,
-			$new_lang => $new_post_id
-		) );
+		$post_translations = pll_get_post_translations($from_post->ID);
+
+		$post_translations[$new_lang] = $new_post_id;
+
+		pll_save_post_translations( $post_translations );
 
 		/*
 		 * Copy relevant extra data
